@@ -908,6 +908,89 @@ class FalkorDBAdapter(VectorDBInterface, GraphDBInterface):
 
         return connections
 
+    async def get_neighborhood(
+        self,
+        node_ids: List[str],
+        depth: int = 1,
+        edge_types: Optional[List[str]] = None,
+    ) -> Tuple[List[Tuple[str, Dict[str, Any]]], List[Tuple[str, str, str, Dict[str, Any]]]]:
+        """
+        Get the k-hop neighborhood subgraph around a set of seed nodes.
+
+        Returns all nodes and edges within `depth` hops of any seed node,
+        in the same format as get_graph_data(). Optional edge_types filter
+        constrains traversal paths to specified relationship types only.
+
+        Parameters:
+        -----------
+            - node_ids (List[str]): Seed node identifiers to start traversal from.
+            - depth (int): Number of hops to traverse from each seed node. Default 1.
+            - edge_types (Optional[List[str]]): If provided, only traverse edges of
+              these relationship types. Default None (all edge types).
+        """
+        if not node_ids:
+            return [], []
+
+        if not isinstance(depth, int) or depth < 1 or depth > 10:
+            raise ValueError(
+                f"depth must be a positive int <= 10 (got {depth!r}); "
+                "FalkorDB variable-length traversals embed depth as a literal."
+            )
+
+        if edge_types:
+            path_query = f"""
+            MATCH path = (seed)-[*1..{depth}]-(neighbour)
+            WHERE seed.id IN $node_ids
+              AND ALL(r IN relationships(path) WHERE TYPE(r) IN $edge_types)
+            RETURN DISTINCT neighbour.id AS nid
+            """
+            params: Dict[str, Any] = {"node_ids": node_ids, "edge_types": edge_types}
+        else:
+            path_query = f"""
+            MATCH (seed)-[*1..{depth}]-(neighbour)
+            WHERE seed.id IN $node_ids
+            RETURN DISTINCT neighbour.id AS nid
+            """
+            params = {"node_ids": node_ids}
+
+        path_result = await self.query(path_query, params)
+        neighbour_ids = (
+            [record[0] for record in path_result.result_set if record[0]]
+            if path_result.result_set
+            else []
+        )
+
+        all_ids = list(set(node_ids) | set(neighbour_ids))
+        if not all_ids:
+            return [], []
+
+        nodes_query = """
+        MATCH (n)
+        WHERE n.id IN $ids
+        RETURN n.id AS id, properties(n) AS properties
+        """
+        nodes_result = await self.query(nodes_query, {"ids": all_ids})
+        nodes: List[Tuple[str, Dict[str, Any]]] = []
+        if nodes_result.result_set:
+            for record in nodes_result.result_set:
+                # FalkorDB returns positional rows: id, properties
+                nodes.append((record[0], record[1]))
+
+        edges_query = """
+        MATCH (n)-[r]->(m)
+        WHERE n.id IN $ids AND m.id IN $ids
+        RETURN n.id AS source_id, m.id AS target_id,
+               TYPE(r) AS relationship_name, properties(r) AS properties
+        """
+        edges_result = await self.query(edges_query, {"ids": all_ids})
+        edges: List[Tuple[str, str, str, Dict[str, Any]]] = []
+        if edges_result.result_set:
+            for record in edges_result.result_set:
+                # FalkorDB returns positional rows: source, target, type, properties
+                edges.append((record[0], record[1], record[2], record[3]))
+
+        return (nodes, edges)
+
     async def search(
         self,
         collection_name: str,
