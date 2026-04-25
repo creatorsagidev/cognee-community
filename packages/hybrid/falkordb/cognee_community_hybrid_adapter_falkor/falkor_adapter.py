@@ -210,7 +210,22 @@ class FalkorDBAdapter(VectorDBInterface, GraphDBInterface):
         if not non_blank:
             return [[] for _ in data]
 
-        result = await self.embedding_engine.embed_text(non_blank)  # type: ignore
+        # Chunk by the embedding engine's configured batch_size. Required because
+        # add_nodes() collects embeddable values across ALL DataPoint nodes into
+        # one all_embeddable list and calls embed_data once — easily exceeding
+        # provider per-batch caps (e.g., Gemini caps BatchEmbedContents at 100).
+        # Without chunking, large documents (88 nodes × 3 embeddable props ≈ 250)
+        # fail with `litellm.BadRequestError: at most 100 requests can be in one
+        # batch`. Chunking here keeps add_nodes' per-document atomicity.
+        batch_size = self.embedding_engine.get_batch_size()
+        if batch_size and batch_size > 0 and len(non_blank) > batch_size:
+            result: list[list[float]] = []
+            for i in range(0, len(non_blank), batch_size):
+                chunk = non_blank[i : i + batch_size]
+                chunk_vectors = await self.embedding_engine.embed_text(chunk)  # type: ignore
+                result.extend(chunk_vectors)
+        else:
+            result = await self.embedding_engine.embed_text(non_blank)  # type: ignore
 
         # Fast path: no blanks were filtered
         if len(non_blank) == len(data):
