@@ -804,9 +804,24 @@ class FalkorDBAdapter(VectorDBInterface, GraphDBInterface):
                 """,
                 {"items": params_list},
             )
-            for i, row in enumerate(result.result_set):
-                if row[3]:  # edge_exists
-                    existing_edges.append(group[i])
+            # Match by (source_id, target_id, rel_name) tuple, not by positional
+            # index. The OPTIONAL MATCH above can return MORE rows than $items
+            # when a (source, target) pair has multiple parallel edges that
+            # satisfy the WHERE clause (e.g., several edges where
+            # `relationship_name` is unset, all matching the
+            # `NOT EXISTS(r.relationship_name)` branch). Indexing `group[i]`
+            # against `enumerate(result.result_set)` then walks past the end of
+            # `group` → IndexError. Tuple-key matching is robust to that
+            # multiplicity and to any future Cypher result reordering.
+            existing_keys = {
+                (row[0], row[1], row[2])
+                for row in result.result_set
+                if row[3]  # edge_exists
+            }
+            for edge in group:
+                key = (str(edge[0]), str(edge[1]), edge[2])
+                if key in existing_keys:
+                    existing_edges.append(edge)
         return existing_edges
 
     async def retrieve(self, collection_name: str, data_point_ids: list[str]):
